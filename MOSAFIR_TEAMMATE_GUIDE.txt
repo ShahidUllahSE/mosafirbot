@@ -47,20 +47,23 @@ Headers: Content-Type: application/json
 
 --- TEXT ---
 {
-  "type": "text_message",
+  "type": "text",
   "jid": "125507618234380@lid",
-  "from": "125507618234380",
+  "from": "923001234567",
   "text": "Hello, I need help with my booking",
   "messageId": "3EB0XXXX",
   "timestamp": 1720000000
 }
 
-IMPORTANT: Use "jid" in reply requests (not just "from").
-WhatsApp now uses @lid IDs — replies fail if you only use the number.
+PHONE NUMBER MAPPING:
+  - "from" is the real customer phone number (country code, digits only)
+  - "jid" is kept for Mosafir internal use (you can ignore it)
+  - Mosafir maps phone <-> jid automatically when messages arrive
+  - For replies, use "to" with the phone number from "from"
 
 --- IMAGE ---
 {
-  "type": "image_message",
+  "type": "image",
   "from": "923001234567",
   "mediaUrl": "https://res.cloudinary.com/.../image.jpg",
   "mimeType": "image/jpeg",
@@ -71,7 +74,7 @@ WhatsApp now uses @lid IDs — replies fail if you only use the number.
 
 --- VOICE NOTE ---
 {
-  "type": "voice_message",
+  "type": "voice",
   "from": "923001234567",
   "mediaUrl": "https://res.cloudinary.com/.../voice.ogg",
   "mimeType": "audio/ogg; codecs=opus",
@@ -83,7 +86,7 @@ WhatsApp now uses @lid IDs — replies fail if you only use the number.
 
 --- DOCUMENT ---
 {
-  "type": "document_message",
+  "type": "document",
   "from": "923001234567",
   "mediaUrl": "https://res.cloudinary.com/.../file.pdf",
   "mimeType": "application/pdf",
@@ -95,7 +98,7 @@ WhatsApp now uses @lid IDs — replies fail if you only use the number.
 
 --- VIDEO ---
 {
-  "type": "video_message",
+  "type": "video",
   "from": "923001234567",
   "mediaUrl": "https://res.cloudinary.com/.../video.mp4",
   "mimeType": "video/mp4",
@@ -106,9 +109,10 @@ WhatsApp now uses @lid IDs — replies fail if you only use the number.
 }
 
 Field meanings:
-  type       text_message | image_message | voice_message | document_message | video_message
-  from       Customer phone (country code, digits only, no +)
-  text       Text content (text_message only)
+  type       text | image | voice | document | video
+  from       Customer phone number — USE THIS for replies (e.g. 923001234567)
+  jid        Internal WhatsApp ID (optional; Mosafir maps phone <-> jid automatically)
+  text       Text content (type: text only)
   mediaUrl   Cloudinary link (media types only)
   mimeType   File MIME type
   fileName   Original file name (documents)
@@ -125,7 +129,7 @@ YOUR JOB:
 Example (Node.js / Express):
   app.post('/webhooks/mosafir', (req, res) => {
     const { type, from, text, mediaUrl } = req.body;
-    if (type === 'text_message') {
+    if (type === 'text') {
       console.log('Text from', from, ':', text);
     } else {
       console.log(type, 'from', from, ':', mediaUrl);
@@ -149,11 +153,12 @@ Phone number format: country code, digits only (e.g. 923001234567)
 POST http://MOSAFIR-SERVER:PORT/whatsapp/text/reply
 
 {
-  "jid": "125507618234380@lid",
+  "to": "923001234567",
   "text": "Hi! Thanks for contacting Mosafir."
 }
 
-You can use "to" instead of "jid" if it includes the full @lid or @s.whatsapp.net suffix.
+Use the "from" phone number from incoming webhook as "to" in replies.
+Full jid (e.g. 125507618234380@lid) still works if needed.
 
 
 --- 2. IMAGE ---

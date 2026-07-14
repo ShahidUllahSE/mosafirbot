@@ -15,9 +15,115 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const authFolder = path.join(__dirname, 'baileys_auth');
 const qrFolder = path.join(__dirname, 'qrcodes');
+const jidMapFile = path.join(__dirname, 'jid_map.json');
 
 fs.ensureDirSync(qrFolder);
 fs.ensureDirSync(authFolder);
+
+let sock = null;
+let baileysLogger = null;
+let currentQr = '';
+let isConnected = false;
+
+// phone (digits) <-> WhatsApp jid (@lid or @s.whatsapp.net)
+const phoneToJidMap = new Map();
+const jidToPhoneMap = new Map();
+
+function loadJidMap() {
+  try {
+    if (!fs.existsSync(jidMapFile)) return;
+    const data = fs.readJsonSync(jidMapFile);
+    for (const [phone, jid] of Object.entries(data.phoneToJid || {})) {
+      phoneToJidMap.set(phone, jid);
+      jidToPhoneMap.set(jid, phone);
+    }
+  } catch (e) {
+    console.warn('⚠️ Could not load jid map:', e.message);
+  }
+}
+
+function saveJidMap() {
+  try {
+    fs.writeJsonSync(jidMapFile, {
+      phoneToJid: Object.fromEntries(phoneToJidMap),
+    });
+  } catch (e) {
+    console.warn('⚠️ Could not save jid map:', e.message);
+  }
+}
+
+function stripJidToDigits(jid) {
+  return (jid || '').replace(/@(c\.us|s\.whatsapp\.net|lid)$/g, '');
+}
+
+function isPhoneJid(jid) {
+  return jid?.endsWith('@s.whatsapp.net') || jid?.endsWith('@c.us');
+}
+
+function normalizePhone(value) {
+  const digits = String(value || '').replace(/\D/g, '');
+  return digits || null;
+}
+
+function registerMapping(phone, jid) {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone || !jid) return;
+
+  phoneToJidMap.set(normalizedPhone, jid);
+  jidToPhoneMap.set(jid, normalizedPhone);
+  saveJidMap();
+}
+
+function phoneFromPn(pn) {
+  if (!pn) return null;
+  if (pn.includes('@')) return stripJidToDigits(pn);
+  return normalizePhone(pn);
+}
+
+function resolveIncomingIdentity(msg, jid) {
+  let phone =
+    phoneFromPn(msg.key?.senderPn) ||
+    phoneFromPn(msg.key?.participantPn) ||
+    jidToPhoneMap.get(jid) ||
+    (isPhoneJid(jid) ? stripJidToDigits(jid) : null);
+
+  if (phone) {
+    registerMapping(phone, jid);
+  }
+
+  return {
+    jid,
+    phone: phone || stripJidToDigits(jid),
+  };
+}
+
+function phoneForJid(jid) {
+  return jidToPhoneMap.get(jid) || (isPhoneJid(jid) ? stripJidToDigits(jid) : null);
+}
+
+function toRecipientJid(to) {
+  const value = String(to || '').trim();
+  if (!value) return null;
+
+  // Full jid (e.g. 125507618234380@lid) — still supported
+  if (value.includes('@')) {
+    const phone = phoneForJid(value) || (isPhoneJid(value) ? stripJidToDigits(value) : null);
+    if (phone) registerMapping(phone, value);
+    return value;
+  }
+
+  const digits = normalizePhone(value);
+  if (!digits) return null;
+
+  // Use mapped jid when teammate sends phone number
+  if (phoneToJidMap.has(digits)) {
+    return phoneToJidMap.get(digits);
+  }
+
+  return `${digits}@s.whatsapp.net`;
+}
+
+loadJidMap();
 
 if (process.env.CLOUDINARY_URL) {
   cloudinary.config({ cloudinary_url: process.env.CLOUDINARY_URL });
@@ -29,27 +135,8 @@ if (process.env.CLOUDINARY_URL) {
   });
 }
 
-let sock = null;
-let baileysLogger = null;
-let currentQr = '';
-let isConnected = false;
-
 function jidToPhone(jid) {
-  return (jid || '').replace(/@(c\.us|s\.whatsapp\.net|lid)$/g, '');
-}
-
-function toRecipientJid(to) {
-  const value = String(to || '').trim();
-  if (!value) return null;
-
-  // Full JID (e.g. 125507618234380@lid or 92300@s.whatsapp.net)
-  if (value.includes('@')) {
-    return value;
-  }
-
-  const digits = value.replace(/\D/g, '');
-  if (!digits) return null;
-  return `${digits}@s.whatsapp.net`;
+  return phoneForJid(jid) || stripJidToDigits(jid);
 }
 
 function isAuthorized(req, res) {
@@ -142,13 +229,13 @@ function detectIncomingMessage(msgContent) {
   if (msgContent.conversation || msgContent.extendedTextMessage?.text) {
     const text = msgContent.conversation || msgContent.extendedTextMessage?.text || '';
     if (text.trim()) {
-      return { webhookType: 'text_message', text: text.trim() };
+      return { webhookType: 'text', text: text.trim() };
     }
   }
 
   if (msgContent.imageMessage) {
     return {
-      webhookType: 'image_message',
+      webhookType: 'image',
       mimeType: msgContent.imageMessage.mimetype || 'image/jpeg',
       caption: msgContent.imageMessage.caption || '',
     };
@@ -156,7 +243,7 @@ function detectIncomingMessage(msgContent) {
 
   if (msgContent.audioMessage) {
     return {
-      webhookType: 'voice_message',
+      webhookType: 'voice',
       mimeType: msgContent.audioMessage.mimetype || 'audio/ogg; codecs=opus',
       duration: msgContent.audioMessage.seconds || null,
     };
@@ -164,7 +251,7 @@ function detectIncomingMessage(msgContent) {
 
   if (msgContent.videoMessage) {
     return {
-      webhookType: 'video_message',
+      webhookType: 'video',
       mimeType: msgContent.videoMessage.mimetype || 'video/mp4',
       caption: msgContent.videoMessage.caption || '',
       duration: msgContent.videoMessage.seconds || null,
@@ -173,7 +260,7 @@ function detectIncomingMessage(msgContent) {
 
   if (msgContent.documentMessage) {
     return {
-      webhookType: 'document_message',
+      webhookType: 'document',
       mimeType: msgContent.documentMessage.mimetype || 'application/octet-stream',
       fileName: msgContent.documentMessage.fileName || 'document',
       caption: msgContent.documentMessage.caption || '',
@@ -190,15 +277,17 @@ async function processIncomingMessage(msg, jid) {
   const detected = detectIncomingMessage(msgContent);
   if (!detected) return;
 
+  const identity = resolveIncomingIdentity(msg, jid);
+
   const basePayload = {
     type: detected.webhookType,
-    jid,
-    from: jidToPhone(jid),
+    jid: identity.jid,
+    from: identity.phone,
     messageId: msg.key.id || null,
     timestamp: Number(msg.messageTimestamp) || Date.now(),
   };
 
-  if (detected.webhookType === 'text_message') {
+  if (detected.webhookType === 'text') {
     await forwardToTeammate({ ...basePayload, text: detected.text });
     console.log('✅ Text forwarded from', basePayload.from);
     return;
@@ -293,6 +382,14 @@ async function startBot() {
   });
 
   sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('chats.phoneNumberShare', ({ lid, jid: phoneJid }) => {
+    const phone = phoneFromPn(phoneJid);
+    if (phone && lid) {
+      registerMapping(phone, lid);
+      console.log('📇 Mapped phone', phone, '↔', lid);
+    }
+  });
 
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
