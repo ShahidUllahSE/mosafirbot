@@ -1,0 +1,261 @@
+================================================================================
+  MOSAFIR WHATSAPP RELAY — GUIDE FOR TEAMMATE
+================================================================================
+
+WHAT THIS DOES
+--------------
+Mosafir connects to WhatsApp via QR code. When a customer sends a message
+(text, image, voice, document, or video), Mosafir automatically POSTs it to
+YOUR webhook. When you want to reply, you POST back to Mosafir and it sends
+the message to that customer on WhatsApp.
+
+Incoming media is uploaded to Cloudinary first — you receive a mediaUrl link.
+
+
+SETUP (MOSAFIR SIDE)
+--------------------
+1. Set in .env:
+
+   TEAMMATE_WEBHOOK_URL=https://YOUR-SERVER.com/your-webhook-path
+   REPLY_API_KEY=choose-a-secret-key        (optional but recommended)
+   WEBHOOK_SECRET=another-secret            (optional)
+   PORT=3000
+
+   Cloudinary (already configured for incoming media):
+   CLOUDINARY_URL=...
+   or CLOUDINARY_CLOUD_NAME / CLOUDINARY_API_KEY / CLOUDINARY_API_SECRET
+
+2. Start the server:
+   npm start
+
+3. Open in browser:
+   http://YOUR-SERVER-IP:3000/qr
+
+4. Scan the QR code with the WhatsApp number that should receive customer chats.
+
+
+================================================================================
+PART 1 — INCOMING MESSAGES (MOSAFIR SENDS TO YOU)
+================================================================================
+
+When a customer messages the connected WhatsApp number, Mosafir immediately
+POSTs to your TEAMMATE_WEBHOOK_URL.
+
+Method:  POST
+Headers: Content-Type: application/json
+         X-Webhook-Secret: <value>   (only if WEBHOOK_SECRET is set)
+
+--- TEXT ---
+{
+  "type": "text_message",
+  "jid": "125507618234380@lid",
+  "from": "125507618234380",
+  "text": "Hello, I need help with my booking",
+  "messageId": "3EB0XXXX",
+  "timestamp": 1720000000
+}
+
+IMPORTANT: Use "jid" in reply requests (not just "from").
+WhatsApp now uses @lid IDs — replies fail if you only use the number.
+
+--- IMAGE ---
+{
+  "type": "image_message",
+  "from": "923001234567",
+  "mediaUrl": "https://res.cloudinary.com/.../image.jpg",
+  "mimeType": "image/jpeg",
+  "caption": "My passport photo",
+  "messageId": "3EB0XXXX",
+  "timestamp": 1720000000
+}
+
+--- VOICE NOTE ---
+{
+  "type": "voice_message",
+  "from": "923001234567",
+  "mediaUrl": "https://res.cloudinary.com/.../voice.ogg",
+  "mimeType": "audio/ogg; codecs=opus",
+  "duration": 12,
+  "caption": "",
+  "messageId": "3EB0XXXX",
+  "timestamp": 1720000000
+}
+
+--- DOCUMENT ---
+{
+  "type": "document_message",
+  "from": "923001234567",
+  "mediaUrl": "https://res.cloudinary.com/.../file.pdf",
+  "mimeType": "application/pdf",
+  "fileName": "passport.pdf",
+  "caption": "",
+  "messageId": "3EB0XXXX",
+  "timestamp": 1720000000
+}
+
+--- VIDEO ---
+{
+  "type": "video_message",
+  "from": "923001234567",
+  "mediaUrl": "https://res.cloudinary.com/.../video.mp4",
+  "mimeType": "video/mp4",
+  "caption": "",
+  "duration": 30,
+  "messageId": "3EB0XXXX",
+  "timestamp": 1720000000
+}
+
+Field meanings:
+  type       text_message | image_message | voice_message | document_message | video_message
+  from       Customer phone (country code, digits only, no +)
+  text       Text content (text_message only)
+  mediaUrl   Cloudinary link (media types only)
+  mimeType   File MIME type
+  fileName   Original file name (documents)
+  caption    Caption if any
+  duration   Seconds (voice/video)
+  messageId  WhatsApp message ID
+  timestamp  Unix timestamp
+
+YOUR JOB:
+  Host one POST endpoint that handles all types (check the "type" field).
+  Return HTTP 200 quickly.
+
+
+Example (Node.js / Express):
+  app.post('/webhooks/mosafir', (req, res) => {
+    const { type, from, text, mediaUrl } = req.body;
+    if (type === 'text_message') {
+      console.log('Text from', from, ':', text);
+    } else {
+      console.log(type, 'from', from, ':', mediaUrl);
+    }
+    res.json({ ok: true });
+  });
+
+
+================================================================================
+PART 2 — OUTGOING REPLIES (YOU SEND TO MOSAFIR)
+================================================================================
+
+All reply endpoints use:
+  Headers: Content-Type: application/json
+           X-API-Key: <REPLY_API_KEY>   (if configured)
+
+Phone number format: country code, digits only (e.g. 923001234567)
+
+
+--- 1. TEXT ---
+POST http://MOSAFIR-SERVER:PORT/whatsapp/text/reply
+
+{
+  "jid": "125507618234380@lid",
+  "text": "Hi! Thanks for contacting Mosafir."
+}
+
+You can use "to" instead of "jid" if it includes the full @lid or @s.whatsapp.net suffix.
+
+
+--- 2. IMAGE ---
+POST http://MOSAFIR-SERVER:PORT/whatsapp/image/reply
+
+{
+  "to": "923001234567",
+  "mediaUrl": "https://your-server.com/photo.jpg",
+  "caption": "Your booking confirmation"
+}
+
+
+--- 3. VOICE NOTE ---
+POST http://MOSAFIR-SERVER:PORT/whatsapp/voice/reply
+
+{
+  "to": "923001234567",
+  "mediaUrl": "https://your-server.com/voice.ogg",
+  "mimetype": "audio/ogg; codecs=opus"
+}
+
+
+--- 4. DOCUMENT ---
+POST http://MOSAFIR-SERVER:PORT/whatsapp/document/reply
+
+{
+  "to": "923001234567",
+  "mediaUrl": "https://your-server.com/invoice.pdf",
+  "fileName": "invoice.pdf",
+  "mimetype": "application/pdf",
+  "caption": "Your invoice"
+}
+
+
+--- 5. VIDEO ---
+POST http://MOSAFIR-SERVER:PORT/whatsapp/video/reply
+
+{
+  "to": "923001234567",
+  "mediaUrl": "https://your-server.com/video.mp4",
+  "caption": "Tour preview",
+  "mimetype": "video/mp4"
+}
+
+Success response (all endpoints):
+{
+  "ok": true,
+  "to": "923001234567"
+}
+
+Error responses:
+  400 — missing or invalid fields
+  401 — wrong API key
+  503 — WhatsApp not connected (scan QR again)
+  500 — send failed
+
+Note: For outgoing media, mediaUrl must be a public URL Mosafir can download.
+      You host the file — Cloudinary is only used for incoming customer media.
+
+
+================================================================================
+OTHER ENDPOINTS (MOSAFIR SERVER — NOT FOR DAILY REPLIES)
+================================================================================
+
+GET /qr
+  Open in browser to scan WhatsApp QR code (Mosafir admin only).
+
+GET /status
+  Check if WhatsApp is connected.
+  Response: { "ok": true, "connected": true, "cloudinaryConfigured": true }
+
+
+================================================================================
+ENDPOINTS SUMMARY FOR TEAMMATE
+================================================================================
+
+  YOU HOST (incoming):
+    POST <your-webhook-url>     ← Mosafir sends all message types here
+
+  YOU CALL (outgoing replies):
+    POST /whatsapp/text/reply
+    POST /whatsapp/image/reply
+    POST /whatsapp/voice/reply
+    POST /whatsapp/document/reply
+    POST /whatsapp/video/reply
+
+
+================================================================================
+QUICK FLOW
+================================================================================
+
+  Customer WhatsApp  -->  Mosafir  -->  POST to YOUR webhook
+  You reply          -->  POST /whatsapp/*/reply  -->  Customer WhatsApp
+
+
+================================================================================
+NOTES
+================================================================================
+- Phone numbers: country code, digits only (e.g. 923001234567)
+- Private chats only (groups ignored)
+- Stickers and locations are not forwarded
+- Keep Mosafir server running 24/7
+- If WhatsApp disconnects, open /qr and scan again
+
+================================================================================

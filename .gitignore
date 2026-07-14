@@ -1,0 +1,22 @@
+# Dependencies
+node_modules/
+
+# Secrets and local config
+.env
+service-account.json
+
+# WhatsApp session and runtime data (required locally, never commit)
+baileys_auth/
+qrcodes/
+receipts/
+
+# Legacy whatsapp-web.js cache and bundled browser (not used by current Baileys app)
+.wwebjs_cache/
+chrome/
+google-chrome-stable_current_amd64.deb
+index.js.wwebjs.backup
+
+# OS and logs
+.DS_Store
+Thumbs.db
+*.log
