@@ -285,6 +285,7 @@ async function processIncomingMessage(msg, jid) {
     jid: identity.jid,
     from: identity.phone,
     to: process.env.COMPANY_WHATSAPP_NUMBER || null,
+    profileName: String(msg.pushName || '').trim() || null,
     messageId: msg.key.id || null,
     timestamp: Number(msg.messageTimestamp) || Date.now(),
   };

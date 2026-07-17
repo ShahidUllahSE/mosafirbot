@@ -51,6 +51,7 @@ Headers: Content-Type: application/json
   "type": "text",
   "jid": "125507618234380@lid",
   "from": "923001234567",
+  "profileName": "Ali Khan",
   "text": "Hello, I need help with my booking",
   "messageId": "3EB0XXXX",
   "timestamp": 1720000000
@@ -113,6 +114,7 @@ Field meanings:
   type       text | image | voice | document | video
   from       Customer phone number — USE THIS for replies (e.g. 923001234567)
   jid        Internal WhatsApp ID (optional; Mosafir maps phone <-> jid automatically)
+  profileName Sender's WhatsApp display name (null when unavailable)
   text       Text content (type: text only)
   mediaUrl   Cloudinary link (media types only)
   mimeType   File MIME type
