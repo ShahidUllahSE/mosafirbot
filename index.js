@@ -405,6 +405,8 @@ async function startBot() {
         if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
 
         console.log('📩 Message from', jidToPhone(jid), '→ processing...');
+        console.log('🔍 Raw incoming WhatsApp message:');
+        console.dir(msg, { depth: null, colors: true });
         await processIncomingMessage(msg, jid);
       } catch (err) {
         console.error('❌ Error forwarding message:', err.message);
