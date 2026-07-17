@@ -44,6 +44,7 @@ POSTs to your TEAMMATE_WEBHOOK_URL.
 Method:  POST
 Headers: Content-Type: application/json
          X-Webhook-Secret: <value>   (only if WEBHOOK_SECRET is set)
+         Authorization: Bearer <value>   (only if WEBHOOK_SECRET is set)
 
 --- TEXT ---
 {

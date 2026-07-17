@@ -183,6 +183,7 @@ async function forwardToTeammate(payload) {
   const headers = { 'Content-Type': 'application/json' };
   if (process.env.WEBHOOK_SECRET) {
     headers['X-Webhook-Secret'] = process.env.WEBHOOK_SECRET;
+    headers.Authorization = `Bearer ${process.env.WEBHOOK_SECRET}`;
   }
 
   const response = await fetch(url, {
@@ -283,6 +284,7 @@ async function processIncomingMessage(msg, jid) {
     type: detected.webhookType,
     jid: identity.jid,
     from: identity.phone,
+    to: process.env.COMPANY_WHATSAPP_NUMBER || null,
     messageId: msg.key.id || null,
     timestamp: Number(msg.messageTimestamp) || Date.now(),
   };
