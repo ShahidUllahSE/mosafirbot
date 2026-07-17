@@ -499,10 +499,14 @@ app.post('/whatsapp/voice/reply', async (req, res) => {
   }
 
   try {
+    const voiceMimetype =
+      !mimetype || String(mimetype).trim().toLowerCase() === 'audio/ogg'
+        ? 'audio/ogg; codecs=opus'
+        : String(mimetype).trim();
     const buffer = await fetchMediaBuffer(mediaUrl);
     await sock.sendMessage(jid, {
       audio: buffer,
-      mimetype: mimetype || 'audio/ogg; codecs=opus',
+      mimetype: voiceMimetype,
       ptt: true,
     });
     console.log('📤 Voice reply sent to', jidToPhone(jid));
