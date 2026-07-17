@@ -431,6 +431,11 @@ app.post('/whatsapp/text/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { text } = req.body || {};
+  console.log('📥 Text reply request:', {
+    to: req.body?.to,
+    jid: req.body?.jid,
+    text,
+  });
   const jid = parseJidFromBody(req, res);
   if (!jid) return;
 
@@ -452,6 +457,12 @@ app.post('/whatsapp/image/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, caption } = req.body || {};
+  console.log('📥 Image reply request:', {
+    to: req.body?.to,
+    jid: req.body?.jid,
+    mediaUrl,
+    caption,
+  });
   const jid = parseJidFromBody(req, res);
   if (!jid) return;
 
@@ -474,6 +485,12 @@ app.post('/whatsapp/voice/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, mimetype } = req.body || {};
+  console.log('📥 Voice reply request:', {
+    to: req.body?.to,
+    jid: req.body?.jid,
+    mediaUrl,
+    mimetype,
+  });
   const jid = parseJidFromBody(req, res);
   if (!jid) return;
 
@@ -500,6 +517,14 @@ app.post('/whatsapp/document/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, fileName, mimetype, caption } = req.body || {};
+  console.log('📥 Document reply request:', {
+    to: req.body?.to,
+    jid: req.body?.jid,
+    mediaUrl,
+    fileName,
+    mimetype,
+    caption,
+  });
   const jid = parseJidFromBody(req, res);
   if (!jid) return;
 
@@ -527,6 +552,13 @@ app.post('/whatsapp/video/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, caption, mimetype } = req.body || {};
+  console.log('📥 Video reply request:', {
+    to: req.body?.to,
+    jid: req.body?.jid,
+    mediaUrl,
+    caption,
+    mimetype,
+  });
   const jid = parseJidFromBody(req, res);
   if (!jid) return;
 
