@@ -8,6 +8,7 @@ const fs = require('fs-extra');
 const qrcode = require('qrcode');
 const path = require('path');
 const cloudinary = require('cloudinary').v2;
+const log = require('./logger');
 
 const app = express();
 app.use(express.json());
@@ -24,6 +25,8 @@ let sock = null;
 let baileysLogger = null;
 let currentQr = '';
 let isConnected = false;
+let isStarting = false;
+let reconnectTimer = null;
 
 // phone (digits) <-> WhatsApp jid (@lid or @s.whatsapp.net)
 const phoneToJidMap = new Map();
@@ -38,7 +41,7 @@ function loadJidMap() {
       jidToPhoneMap.set(jid, phone);
     }
   } catch (e) {
-    console.warn('⚠️ Could not load jid map:', e.message);
+    log.warn('⚠️ Could not load jid map:', e.message);
   }
 }
 
@@ -48,7 +51,7 @@ function saveJidMap() {
       phoneToJid: Object.fromEntries(phoneToJidMap),
     });
   } catch (e) {
-    console.warn('⚠️ Could not save jid map:', e.message);
+    log.warn('⚠️ Could not save jid map:', e.message);
   }
 }
 
@@ -176,7 +179,7 @@ function parseJidFromBody(req, res) {
 async function forwardToTeammate(payload) {
   const url = process.env.TEAMMATE_WEBHOOK_URL;
   if (!url) {
-    console.warn('⚠️ TEAMMATE_WEBHOOK_URL not set — message not forwarded');
+    log.warn('⚠️ TEAMMATE_WEBHOOK_URL not set — message not forwarded');
     return;
   }
 
@@ -292,7 +295,7 @@ async function processIncomingMessage(msg, jid) {
 
   if (detected.webhookType === 'text') {
     await forwardToTeammate({ ...basePayload, text: detected.text });
-    console.log('✅ Text forwarded from', basePayload.from);
+    log.success('✅ Text forwarded from', basePayload.from);
     return;
   }
 
@@ -310,111 +313,163 @@ async function processIncomingMessage(msg, jid) {
   if (detected.duration != null) payload.duration = detected.duration;
 
   await forwardToTeammate(payload);
-  console.log('✅', detected.webhookType, 'forwarded from', basePayload.from);
+  log.success('✅', detected.webhookType, 'forwarded from', basePayload.from);
+}
+
+function endSocket() {
+  if (!sock) return;
+  try {
+    sock.ev.removeAllListeners();
+    sock.end?.(undefined);
+  } catch (_) {
+    // ignore teardown errors
+  }
+  sock = null;
+}
+
+function clearAuthFolder() {
+  try {
+    if (fs.existsSync(authFolder)) {
+      fs.removeSync(authFolder);
+      fs.ensureDirSync(authFolder);
+    }
+  } catch (e) {
+    log.failed('Could not clear auth:', e.message);
+  }
+}
+
+function scheduleReconnect(delayMs, reason) {
+  if (reconnectTimer || isStarting) {
+    log.other('⏳ Reconnect already pending, skip (' + reason + ')');
+    return;
+  }
+  log.other('🔄 Reconnecting in ' + delayMs / 1000 + 's... (' + reason + ')');
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    startBot().catch((err) => log.failed('Failed to restart Baileys:', err));
+  }, delayMs);
 }
 
 async function startBot() {
-  const {
-    default: makeWASocket,
-    useMultiFileAuthState,
-    fetchLatestBaileysVersion,
-    makeCacheableSignalKeyStore,
-    DisconnectReason,
-  } = await import('@whiskeysockets/baileys');
-  const pino = (await import('pino')).default;
-  const { Boom } = await import('@hapi/boom');
+  if (isStarting) {
+    log.other('⏳ startBot already in progress, skip');
+    return sock;
+  }
+  isStarting = true;
 
-  baileysLogger = pino({ level: 'silent' });
+  try {
+    endSocket();
 
-  console.log('🚀 Starting Mosafir WhatsApp relay...');
+    const {
+      default: makeWASocket,
+      useMultiFileAuthState,
+      fetchLatestBaileysVersion,
+      makeCacheableSignalKeyStore,
+      DisconnectReason,
+    } = await import('@whiskeysockets/baileys');
+    const pino = (await import('pino')).default;
+    const { Boom } = await import('@hapi/boom');
 
-  const { state, saveCreds } = await useMultiFileAuthState(authFolder);
-  const { version } = await fetchLatestBaileysVersion();
+    baileysLogger = pino({ level: 'silent' });
 
-  sock = makeWASocket({
-    version,
-    logger: baileysLogger,
-    auth: {
-      creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
-    },
-    printQRInTerminal: true,
-  });
+    log.other('🚀 Starting Mosafir WhatsApp relay...');
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
+    const { state, saveCreds } = await useMultiFileAuthState(authFolder);
+    const { version } = await fetchLatestBaileysVersion();
 
-    if (qr) {
-      console.log('📱 Scan QR at http://localhost:' + PORT + '/qr');
-      try {
-        currentQr = await qrcode.toDataURL(qr);
-        await qrcode.toFile(path.join(qrFolder, 'last_qr.png'), qr);
-      } catch (e) {
-        console.error('⚠️ Could not save QR:', e.message);
-        currentQr = qr;
-      }
-    }
+    sock = makeWASocket({
+      version,
+      logger: baileysLogger,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, baileysLogger),
+      },
+      printQRInTerminal: true,
+      keepAliveIntervalMs: 60000,
+      markOnlineOnConnect: false,
+    });
 
-    if (connection === 'close') {
-      const statusCode =
-        lastDisconnect?.error instanceof Boom
-          ? lastDisconnect.error.output?.statusCode
-          : 0;
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect, qr } = update;
 
-      isConnected = false;
-
-      if (statusCode !== DisconnectReason.loggedOut) {
-        console.log('🔄 Reconnecting in 10 seconds...');
-        setTimeout(() => startBot(), 10000);
-      } else {
-        console.log('❌ Logged out — clearing auth for fresh QR...');
+      if (qr) {
+        log.other('📱 Scan QR at http://localhost:' + PORT + '/qr');
         try {
-          if (fs.existsSync(authFolder)) {
-            fs.removeSync(authFolder);
-            setTimeout(() => startBot(), 5000);
-          }
+          currentQr = await qrcode.toDataURL(qr);
+          await qrcode.toFile(path.join(qrFolder, 'last_qr.png'), qr);
         } catch (e) {
-          console.log('Could not clear auth:', e.message);
+          log.failed('⚠️ Could not save QR:', e.message);
+          currentQr = qr;
         }
       }
-    } else if (connection === 'open') {
-      isConnected = true;
-      currentQr = '';
-      console.log('\n✅ Mosafir WhatsApp connected and ready.\n');
-    }
-  });
 
-  sock.ev.on('creds.update', saveCreds);
+      if (connection === 'close') {
+        const statusCode =
+          lastDisconnect?.error instanceof Boom
+            ? lastDisconnect.error.output?.statusCode
+            : 0;
 
-  sock.ev.on('chats.phoneNumberShare', ({ lid, jid: phoneJid }) => {
-    const phone = phoneFromPn(phoneJid);
-    if (phone && lid) {
-      registerMapping(phone, lid);
-      console.log('📇 Mapped phone', phone, '↔', lid);
-    }
-  });
+        isConnected = false;
 
-  sock.ev.on('messages.upsert', async ({ messages, type }) => {
-    if (type !== 'notify') return;
+        const loggedOut = statusCode === DisconnectReason.loggedOut;
+        const badSession = statusCode === DisconnectReason.badSession;
+        const replaced = statusCode === DisconnectReason.connectionReplaced;
 
-    for (const msg of messages) {
-      try {
-        if (msg.key.fromMe) continue;
+        // Always tear down this socket before any reconnect
+        endSocket();
 
-        const jid = msg.key.remoteJid;
-        if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
-
-        console.log('📩 Message from', jidToPhone(jid), '→ processing...');
-        console.log('🔍 Raw incoming WhatsApp message:');
-        console.dir(msg, { depth: null, colors: true });
-        await processIncomingMessage(msg, jid);
-      } catch (err) {
-        console.error('❌ Error forwarding message:', err.message);
+        if (loggedOut || badSession) {
+          log.failed('❌ Session invalid (' + statusCode + ') — clearing auth for fresh QR...');
+          clearAuthFolder();
+          scheduleReconnect(5000, 'fresh QR');
+        } else if (replaced) {
+          // Another connection took over — wait longer so we don't fight it
+          log.warn('⚠️ Connection replaced — waiting before single reconnect...');
+          scheduleReconnect(15000, 'connection replaced');
+        } else {
+          // Temporary drop — keep baileys_auth and reconnect once
+          scheduleReconnect(10000, 'status ' + statusCode);
+        }
+      } else if (connection === 'open') {
+        isConnected = true;
+        currentQr = '';
+        log.success('✅ Mosafir WhatsApp connected and ready.');
       }
-    }
-  });
+    });
 
-  return sock;
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('chats.phoneNumberShare', ({ lid, jid: phoneJid }) => {
+      const phone = phoneFromPn(phoneJid);
+      if (phone && lid) {
+        registerMapping(phone, lid);
+        log.other('📇 Mapped phone', phone, '↔', lid);
+      }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+      if (type !== 'notify') return;
+
+      for (const msg of messages) {
+        try {
+          if (msg.key.fromMe) continue;
+
+          const jid = msg.key.remoteJid;
+          if (!jid || jid.endsWith('@g.us') || jid === 'status@broadcast') continue;
+
+          log.other('📩 Message from', jidToPhone(jid), '→ processing...');
+          log.other('🔍 Raw incoming WhatsApp message:', msg);
+          await processIncomingMessage(msg, jid);
+        } catch (err) {
+          log.failed('❌ Error forwarding message:', err.message);
+        }
+      }
+    });
+
+    return sock;
+  } finally {
+    isStarting = false;
+  }
 }
 
 app.get('/status', (req, res) => {
@@ -431,7 +486,7 @@ app.post('/whatsapp/text/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { text } = req.body || {};
-  console.log('📥 Text reply request:', {
+  log.other('📥 Text reply request:', {
     to: req.body?.to,
     jid: req.body?.jid,
     text,
@@ -445,10 +500,10 @@ app.post('/whatsapp/text/reply', async (req, res) => {
 
   try {
     await sock.sendMessage(jid, { text: String(text).trim() });
-    console.log('📤 Text reply sent to', jidToPhone(jid));
+    log.success('📤 Text reply sent to', jidToPhone(jid));
     res.json({ ok: true, to: jidToPhone(jid) });
   } catch (err) {
-    console.error('❌ Failed to send text reply:', err.message);
+    log.failed('❌ Failed to send text reply:', err.message);
     res.status(500).json({ ok: false, error: 'Failed to send WhatsApp message' });
   }
 });
@@ -457,7 +512,7 @@ app.post('/whatsapp/image/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, caption } = req.body || {};
-  console.log('📥 Image reply request:', {
+  log.other('📥 Image reply request:', {
     to: req.body?.to,
     jid: req.body?.jid,
     mediaUrl,
@@ -473,10 +528,10 @@ app.post('/whatsapp/image/reply', async (req, res) => {
   try {
     const buffer = await fetchMediaBuffer(mediaUrl);
     await sock.sendMessage(jid, { image: buffer, caption: caption || '' });
-    console.log('📤 Image reply sent to', jidToPhone(jid));
+    log.success('📤 Image reply sent to', jidToPhone(jid));
     res.json({ ok: true, to: jidToPhone(jid) });
   } catch (err) {
-    console.error('❌ Failed to send image reply:', err.message);
+    log.failed('❌ Failed to send image reply:', err.message);
     res.status(500).json({ ok: false, error: 'Failed to send image' });
   }
 });
@@ -485,7 +540,7 @@ app.post('/whatsapp/voice/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, mimetype } = req.body || {};
-  console.log('📥 Voice reply request:', {
+  log.other('📥 Voice reply request:', {
     to: req.body?.to,
     jid: req.body?.jid,
     mediaUrl,
@@ -509,10 +564,10 @@ app.post('/whatsapp/voice/reply', async (req, res) => {
       mimetype: voiceMimetype,
       ptt: true,
     });
-    console.log('📤 Voice reply sent to', jidToPhone(jid));
+    log.success('📤 Voice reply sent to', jidToPhone(jid));
     res.json({ ok: true, to: jidToPhone(jid) });
   } catch (err) {
-    console.error('❌ Failed to send voice reply:', err.message);
+    log.failed('❌ Failed to send voice reply:', err.message);
     res.status(500).json({ ok: false, error: 'Failed to send voice note' });
   }
 });
@@ -521,7 +576,7 @@ app.post('/whatsapp/document/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, fileName, mimetype, caption } = req.body || {};
-  console.log('📥 Document reply request:', {
+  log.other('📥 Document reply request:', {
     to: req.body?.to,
     jid: req.body?.jid,
     mediaUrl,
@@ -544,10 +599,10 @@ app.post('/whatsapp/document/reply', async (req, res) => {
       fileName: fileName || 'document.pdf',
       caption: caption || '',
     });
-    console.log('📤 Document reply sent to', jidToPhone(jid));
+    log.success('📤 Document reply sent to', jidToPhone(jid));
     res.json({ ok: true, to: jidToPhone(jid) });
   } catch (err) {
-    console.error('❌ Failed to send document reply:', err.message);
+    log.failed('❌ Failed to send document reply:', err.message);
     res.status(500).json({ ok: false, error: 'Failed to send document' });
   }
 });
@@ -556,7 +611,7 @@ app.post('/whatsapp/video/reply', async (req, res) => {
   if (!requireWhatsApp(req, res)) return;
 
   const { mediaUrl, caption, mimetype } = req.body || {};
-  console.log('📥 Video reply request:', {
+  log.other('📥 Video reply request:', {
     to: req.body?.to,
     jid: req.body?.jid,
     mediaUrl,
@@ -577,10 +632,10 @@ app.post('/whatsapp/video/reply', async (req, res) => {
       mimetype: mimetype || 'video/mp4',
       caption: caption || '',
     });
-    console.log('📤 Video reply sent to', jidToPhone(jid));
+    log.success('📤 Video reply sent to', jidToPhone(jid));
     res.json({ ok: true, to: jidToPhone(jid) });
   } catch (err) {
-    console.error('❌ Failed to send video reply:', err.message);
+    log.failed('❌ Failed to send video reply:', err.message);
     res.status(500).json({ ok: false, error: 'Failed to send video' });
   }
 });
@@ -626,30 +681,30 @@ app.get('/qr-image', (req, res) => {
 });
 
 app.use((err, req, res, next) => {
-  console.error('Express error:', err);
+  log.failed('Express error:', err);
   res.status(500).json({ ok: false, error: 'Server error' });
 });
 
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log('🌐 Mosafir server: http://localhost:' + PORT);
-  console.log('   QR:       GET  /qr');
-  console.log('   Status:   GET  /status');
-  console.log('   Replies:  POST /whatsapp/text/reply');
-  console.log('             POST /whatsapp/image/reply');
-  console.log('             POST /whatsapp/voice/reply');
-  console.log('             POST /whatsapp/document/reply');
-  console.log('             POST /whatsapp/video/reply');
-  console.log('🔄 Connecting to WhatsApp...\n');
+  log.other('🌐 Mosafir server: http://localhost:' + PORT);
+  log.other('   QR:       GET  /qr');
+  log.other('   Status:   GET  /status');
+  log.other('   Replies:  POST /whatsapp/text/reply');
+  log.other('             POST /whatsapp/image/reply');
+  log.other('             POST /whatsapp/voice/reply');
+  log.other('             POST /whatsapp/document/reply');
+  log.other('             POST /whatsapp/video/reply');
+  log.other('🔄 Connecting to WhatsApp...');
   startBot().catch((err) => {
-    console.error('Failed to start Baileys:', err);
+    log.failed('Failed to start Baileys:', err);
   });
 });
 
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error('❌ Port', PORT, 'is already in use.');
+    log.failed('❌ Port', PORT, 'is already in use.');
   } else {
-    console.error('Server error:', err);
+    log.failed('Server error:', err);
   }
   process.exit(1);
 });
