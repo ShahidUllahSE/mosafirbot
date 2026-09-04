@@ -27,6 +27,7 @@ let currentQr = '';
 let isConnected = false;
 let isStarting = false;
 let reconnectTimer = null;
+let reconnectAttempt = 0;
 
 // phone (digits) <-> WhatsApp jid (@lid or @s.whatsapp.net)
 const phoneToJidMap = new Map();
@@ -338,12 +339,32 @@ function clearAuthFolder() {
   }
 }
 
+/** Keep baileys_auth unless WhatsApp truly logged this device out (401). */
+function backoffDelayMs(statusCode, DisconnectReason) {
+  reconnectAttempt += 1;
+
+  // WhatsApp forbidden — do NOT hammer; long wait, keep session files
+  if (statusCode === DisconnectReason.forbidden) {
+    const mins = Math.min(2 ** Math.min(reconnectAttempt, 4), 30); // 2..30 min
+    return mins * 60 * 1000;
+  }
+
+  if (statusCode === DisconnectReason.connectionReplaced) {
+    return 30 * 1000;
+  }
+
+  // Normal drops: 5s, 10s, 20s... max 2 min
+  return Math.min(5000 * 2 ** Math.min(reconnectAttempt - 1, 5), 120000);
+}
+
 function scheduleReconnect(delayMs, reason) {
   if (reconnectTimer || isStarting) {
     log.other('⏳ Reconnect already pending, skip (' + reason + ')');
     return;
   }
-  log.other('🔄 Reconnecting in ' + delayMs / 1000 + 's... (' + reason + ')');
+  log.other(
+    '🔄 Reconnecting in ' + Math.round(delayMs / 1000) + 's... (' + reason + ', attempt ' + reconnectAttempt + ')'
+  );
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
     startBot().catch((err) => log.failed('Failed to restart Baileys:', err));
@@ -387,6 +408,9 @@ async function startBot() {
       printQRInTerminal: true,
       keepAliveIntervalMs: 60000,
       markOnlineOnConnect: false,
+      syncFullHistory: false,
+      browser: ['Mosafir', 'Chrome', '120.0.0'],
+      connectTimeoutMs: 60000,
     });
 
     sock.ev.on('connection.update', async (update) => {
@@ -395,6 +419,7 @@ async function startBot() {
       if (qr) {
         log.other('📱 Scan QR at http://localhost:' + PORT + '/qr');
         try {
+          fs.ensureDirSync(qrFolder);
           currentQr = await qrcode.toDataURL(qr);
           await qrcode.toFile(path.join(qrFolder, 'last_qr.png'), qr);
         } catch (e) {
@@ -404,35 +429,46 @@ async function startBot() {
       }
 
       if (connection === 'close') {
-        const statusCode =
-          lastDisconnect?.error instanceof Boom
-            ? lastDisconnect.error.output?.statusCode
-            : 0;
+        const err = lastDisconnect?.error;
+        const statusCode = err instanceof Boom ? err.output?.statusCode : 0;
+        const errMsg = err?.message || String(err || 'unknown');
 
         isConnected = false;
 
         const loggedOut = statusCode === DisconnectReason.loggedOut;
         const badSession = statusCode === DisconnectReason.badSession;
-        const replaced = statusCode === DisconnectReason.connectionReplaced;
 
         // Always tear down this socket before any reconnect
         endSocket();
 
-        if (loggedOut || badSession) {
-          log.failed('❌ Session invalid (' + statusCode + ') — clearing auth for fresh QR...');
+        log.failed('🔌 Disconnected:', statusCode, errMsg);
+
+        if (loggedOut) {
+          // Only real WhatsApp logout / unlink — need new QR
+          log.failed('❌ Logged out by WhatsApp (401) — clearing auth. Scan QR again.');
           clearAuthFolder();
-          scheduleReconnect(5000, 'fresh QR');
-        } else if (replaced) {
-          // Another connection took over — wait longer so we don't fight it
-          log.warn('⚠️ Connection replaced — waiting before single reconnect...');
-          scheduleReconnect(15000, 'connection replaced');
+          reconnectAttempt = 0;
+          scheduleReconnect(5000, 'logged out → fresh QR');
+        } else if (badSession) {
+          log.failed('❌ Bad session (500) — clearing auth. Scan QR again.');
+          clearAuthFolder();
+          reconnectAttempt = 0;
+          scheduleReconnect(5000, 'bad session → fresh QR');
         } else {
-          // Temporary drop — keep baileys_auth and reconnect once
-          scheduleReconnect(10000, 'status ' + statusCode);
+          // Temporary / forbidden / network — KEEP baileys_auth and reconnect
+          // Do not wipe session on 403; hammering every 10s makes bans worse
+          const delay = backoffDelayMs(statusCode, DisconnectReason);
+          if (statusCode === DisconnectReason.forbidden) {
+            log.warn(
+              '⚠️ WhatsApp returned 403 (forbidden). Keeping session; waiting before retry (do not spam).'
+            );
+          }
+          scheduleReconnect(delay, 'status ' + statusCode);
         }
       } else if (connection === 'open') {
         isConnected = true;
         currentQr = '';
+        reconnectAttempt = 0;
         log.success('✅ Mosafir WhatsApp connected and ready.');
       }
     });
